@@ -3,16 +3,20 @@
 DEBUG ?= 0
 CFLAGS ?= -O2 -Wall
 CXXFLAGS = $(CFLAGS) -std=c++11
+BINDIR ?= /usr/local/bin
 
 OBJS = main.o
 
 %.o: %.cc
 	$(CXX) -DDEBUG=$(DEBUG) $(CXXFLAGS) -c -o $@ $<
 
-all: $(OBJS)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o lsrepostat $(OBJS)
+lsrepostat: $(OBJS)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $(OBJS)
 
-install:
+all: lsrepostat
+
+install: lsrepostat
+	install -m 755 lsrepostat $(BINDIR)/lsrepostat
 
 clean:
 	rm -f $(OBJS) lsrepostat
