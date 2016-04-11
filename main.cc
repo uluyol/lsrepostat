@@ -155,11 +155,15 @@ ExecStatus exec_in_dir(const char *dir, const char *file, ...) {
   if (DEBUG)
     fprintf(stderr, "DEBUG: exec_in_dir: reading...\n");
   char buf[1];
-  status.empty = read(fd[0], buf, 1) == 0;
-  close(fd[0]);
+  status.empty = read(fd[0], buf, 1) <= 0;
+  char bigbuf[BUFSIZ];
+  while (read(fd[0], bigbuf, BUFSIZ) > 0)
+    continue;
 
-  if (DEBUG)
+  if (DEBUG) {
+    fprintf(stderr, "DEBUG: exec_in_dir: empty stdout: %d\n", status.empty);
     fprintf(stderr, "DEBUG: exec_in_dir: waiting...\n");
+  }
 
   int wstatus;
   if (waitpid(pid, &wstatus, 0) == -1) {
@@ -215,6 +219,8 @@ bool GitChecker::has_untracked() {
 }
 
 bool GitChecker::has_unpushed() {
+  // TODO: reimplement but make fast
+  //       git cherry is slow
   return false;
   auto st = exec_in_dir(path_, "git", "cherry", "-v", (char *)0);
   if (st.ret != 0) {
