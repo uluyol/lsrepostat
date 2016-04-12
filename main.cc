@@ -119,7 +119,8 @@ static int ExecInDirGetOutArgs(const char *dir, std::vector<char> *output,
   }
 
   int fd[2];
-  pipe(fd);
+  if (pipe(fd) != 0)
+    return -1;
 
   pid_t pid = fork();
   if (pid == -1) {
@@ -151,6 +152,7 @@ static int ExecInDirGetOutArgs(const char *dir, std::vector<char> *output,
     output->resize(total + BUFSIZ);
   } while ((n = read(fd[0], &(output->at(total)), BUFSIZ)) > 0);
   output->resize(total);
+  close(fd[0]);
 
   if (DEBUG) {
     fprintf(stderr, "DEBUG: ExecInDirGetOutArgs: empty stdout: %d\n",
@@ -218,12 +220,13 @@ public:
   virtual bool HasUnpushed() = 0;
 
 protected:
-  const char *path_;
+  char *path_;
 };
 
 class GitChecker : public VcsChecker {
 public:
-  GitChecker(std::string path) { path_ = path.c_str(); }
+  GitChecker(std::string path) { path_ = strdup(path.c_str()); }
+  ~GitChecker() { free(path_); }
   bool HasUncommitted();
   bool HasUnstaged();
   bool HasUntracked();
@@ -296,7 +299,15 @@ bool isdir(const std::string path) {
 
 int RecurseSubdirs(const std::string path, enum Mode mode) {
   DIR *dir = opendir(path.c_str());
-  struct dirent *entry;
+  if (dir == NULL) {
+    if (DEBUG) {
+      printf("DEBUG: RecurseSubdirs: failed to open dir %s\n", path.c_str());
+      perror("");
+    }
+    return -1;
+  }
+  struct dirent *entry = NULL;
+  int ret = 0;
   for (entry = readdir(dir); entry != NULL; entry = readdir(dir)) {
     if (entry->d_type != DT_DIR)
       continue;
@@ -305,9 +316,10 @@ int RecurseSubdirs(const std::string path, enum Mode mode) {
     std::string p = path + "/" + entry->d_name;
     int ret = 0;
     if ((ret = Recurse(p, mode)) != 0)
-      return ret;
+      break;
   }
-  return 0;
+  closedir(dir);
+  return ret;
 }
 
 int Recurse(const std::string path, enum Mode mode) {
@@ -317,7 +329,8 @@ int Recurse(const std::string path, enum Mode mode) {
     return 1;
   }
   VcsChecker *checker = nullptr;
-  if (isdir(path + "/.git"))
+  std::string vcs_str = path + "/.git";
+  if (isdir(vcs_str))
     checker = new GitChecker(path);
 
   if (checker == nullptr) {
