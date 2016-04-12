@@ -19,7 +19,7 @@ install: lsrepostat
 	install -m 755 lsrepostat $(BINDIR)/lsrepostat
 
 clean:
-	rm -f $(OBJS) lsrepostat
+	rm -rf $(OBJS) lsrepostat lsrepostat.dSYM
 
 fmt:
 	@find . -iname '*.cc' -o -iname '*.h' -o -iname '*.c' | xargs clang-format -i
