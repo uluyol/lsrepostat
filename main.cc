@@ -20,11 +20,12 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 */
 
+#include <cctype>
+#include <cstdbool>
+#include <cstdio>
 #include <dirent.h>
 #include <fcntl.h>
 #include <iostream>
-#include <stdbool.h>
-#include <stdio.h>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -57,7 +58,7 @@ void usage(char *name) {
   fprintf(stderr, "\t-a\tlist repositories with any pending work (default)\n");
 }
 
-int recurse(const std::string path, enum Mode mode);
+int Recurse(const std::string path, enum Mode mode);
 
 int main(int argc, char **argv) {
   enum Mode mode = kNone;
@@ -87,10 +88,10 @@ int main(int argc, char **argv) {
   }
 
   if (optind >= argc)
-    return recurse(".", mode);
+    return Recurse(".", mode);
 
   for (int i = optind; i < argc; i++) {
-    int ret = recurse(std::string(argv[i]), mode);
+    int ret = Recurse(std::string(argv[i]), mode);
     if (ret != 0) {
       return ret;
     }
@@ -104,22 +105,12 @@ typedef struct {
   bool empty;
 } ExecStatus;
 
-ExecStatus exec_in_dir(const char *dir, const char *file, ...) {
-  std::vector<const char *> args;
-  args.push_back(file);
-  va_list ap;
-
-  va_start(ap, file);
-  const char *s;
-  while ((s = va_arg(ap, const char *)) != 0) {
-    args.push_back(s);
-  }
-  va_end(ap);
-  args.push_back(0);
-
+static int ExecInDirGetOutArgs(const char *dir, std::vector<char> *output,
+                               const char *file,
+                               std::vector<const char *> &args) {
   if (DEBUG) {
-    fprintf(stderr, "DEBUG: exec_in_dir dir: %s\n", dir);
-    fprintf(stderr, "DEBUG: exec_in_dir cmd:");
+    fprintf(stderr, "DEBUG: ExecInDirGetOutArgs dir: %s\n", dir);
+    fprintf(stderr, "DEBUG: ExecInDirGetOutArgs cmd:");
     for (auto &a : args) {
       if (a != 0)
         fprintf(stderr, " %s", a);
@@ -150,19 +141,21 @@ ExecStatus exec_in_dir(const char *dir, const char *file, ...) {
   }
   close(fd[1]);
 
-  ExecStatus status;
-
   if (DEBUG)
-    fprintf(stderr, "DEBUG: exec_in_dir: reading...\n");
-  char buf[1];
-  status.empty = read(fd[0], buf, 1) <= 0;
-  char bigbuf[BUFSIZ];
-  while (read(fd[0], bigbuf, BUFSIZ) > 0)
-    continue;
+    fprintf(stderr, "DEBUG: ExecInDirGetOutArgs: reading...\n");
+
+  ssize_t total = 0;
+  ssize_t n = 0;
+  do {
+    total += n;
+    output->resize(total + BUFSIZ);
+  } while ((n = read(fd[0], &(output->at(total)), BUFSIZ)) > 0);
+  output->resize(total);
 
   if (DEBUG) {
-    fprintf(stderr, "DEBUG: exec_in_dir: empty stdout: %d\n", status.empty);
-    fprintf(stderr, "DEBUG: exec_in_dir: waiting...\n");
+    fprintf(stderr, "DEBUG: ExecInDirGetOutArgs: empty stdout: %d\n",
+            total == 0);
+    fprintf(stderr, "DEBUG: ExecInDirGetOutArgs: waiting...\n");
   }
 
   int wstatus;
@@ -171,12 +164,47 @@ ExecStatus exec_in_dir(const char *dir, const char *file, ...) {
     exit(4);
   }
   if (DEBUG)
-    fprintf(stderr, "DEBUG: exec_in_dir: returned\n");
+    fprintf(stderr, "DEBUG: ExecInDirGetOutArgs: returned\n");
 
   if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0)
-    status.ret = 0;
-  else
-    status.ret = 1;
+    return 0;
+  return 1;
+}
+
+int ExecInDirGetOut(const char *dir, std::vector<char> *output,
+                    const char *file, ...) {
+  std::vector<const char *> args;
+  args.push_back(file);
+  va_list ap;
+
+  va_start(ap, file);
+  const char *s;
+  while ((s = va_arg(ap, const char *)) != 0) {
+    args.push_back(s);
+  }
+  va_end(ap);
+  args.push_back(0);
+  return ExecInDirGetOutArgs(dir, output, file, args);
+}
+
+ExecStatus ExecInDir(const char *dir, const char *file, ...) {
+  std::vector<const char *> args;
+  args.push_back(file);
+  va_list ap;
+
+  va_start(ap, file);
+  const char *s;
+  while ((s = va_arg(ap, const char *)) != 0) {
+    args.push_back(s);
+  }
+  va_end(ap);
+  args.push_back(0);
+
+  std::vector<char> out;
+  ExecStatus status;
+  status.ret = ExecInDirGetOutArgs(dir, &out, file, args);
+  status.empty = out.size() == 0;
+
   return status;
 }
 
@@ -184,10 +212,10 @@ class VcsChecker {
 public:
   VcsChecker(){};
   virtual ~VcsChecker(){};
-  virtual bool has_uncommitted() = 0;
-  virtual bool has_unstaged() = 0;
-  virtual bool has_untracked() = 0;
-  virtual bool has_unpushed() = 0;
+  virtual bool HasUncommitted() = 0;
+  virtual bool HasUnstaged() = 0;
+  virtual bool HasUntracked() = 0;
+  virtual bool HasUnpushed() = 0;
 
 protected:
   const char *path_;
@@ -196,38 +224,67 @@ protected:
 class GitChecker : public VcsChecker {
 public:
   GitChecker(std::string path) { path_ = path.c_str(); }
-  bool has_uncommitted();
-  bool has_unstaged();
-  bool has_untracked();
-  bool has_unpushed();
+  bool HasUncommitted();
+  bool HasUnstaged();
+  bool HasUntracked();
+  bool HasUnpushed();
 };
 
-bool GitChecker::has_uncommitted() {
-  auto st = exec_in_dir(path_, "git", "diff-index", "--cached", "--quiet",
-                        "HEAD", (char *)0);
+bool GitChecker::HasUncommitted() {
+  auto st = ExecInDir(path_, "git", "diff-index", "--cached", "--quiet", "HEAD",
+                      (char *)0);
   return st.ret != 0;
 }
 
-bool GitChecker::has_unstaged() {
-  return exec_in_dir(path_, "git", "diff-files", "--quiet", (char *)0).ret != 0;
+bool GitChecker::HasUnstaged() {
+  return ExecInDir(path_, "git", "diff-files", "--quiet", (char *)0).ret != 0;
 }
 
-bool GitChecker::has_untracked() {
-  auto st = exec_in_dir(path_, "git", "ls-files", "-o", "--exclude-standard",
-                        (char *)0);
+bool GitChecker::HasUntracked() {
+  auto st = ExecInDir(path_, "git", "ls-files", "-o", "--exclude-standard",
+                      (char *)0);
   return !st.empty;
 }
 
-bool GitChecker::has_unpushed() {
-  // TODO: reimplement but make fast
-  //       git cherry is slow
-  return false;
-  auto st = exec_in_dir(path_, "git", "cherry", "-v", (char *)0);
-  if (st.ret != 0) {
-    // no tracking repository
-    return false;
+void TrimRight(std::string *s) {
+  ssize_t i;
+
+  for (i = s->size() - 1; i >= 0; i--) {
+    if (!isspace((*s)[i]))
+      break;
   }
-  return !st.empty;
+
+  s->resize(i + 1);
+}
+
+bool GitChecker::HasUnpushed() {
+  std::vector<char> out;
+
+  if (ExecInDirGetOut(path_, &out, "git", "symbolic-ref", "HEAD", (char *)0) !=
+      0)
+    return false;
+  std::string local_name(out.begin(), out.end());
+  TrimRight(&local_name);
+
+  if (ExecInDirGetOut(path_, &out, "git", "rev-parse", local_name.c_str(),
+                      (char *)0) != 0)
+    return false;
+  std::string local_rev(out.begin(), out.end());
+  TrimRight(&local_rev);
+
+  if (ExecInDirGetOut(path_, &out, "git", "for-each-ref",
+                      "--format=%(upstream:short)", local_name.c_str(),
+                      (char *)0) != 0)
+    return false;
+  std::string remote_name(out.begin(), out.end());
+  TrimRight(&remote_name);
+
+  if (ExecInDirGetOut(path_, &out, "git", "rev-parse", remote_name.c_str(),
+                      (char *)0) != 0)
+    return false;
+  std::string remote_rev = std::string(out.begin(), out.end());
+  TrimRight(&remote_rev);
+  return local_rev != remote_rev;
 }
 
 bool isdir(const std::string path) {
@@ -237,7 +294,7 @@ bool isdir(const std::string path) {
   return false;
 }
 
-int recurse_subdirs(const std::string path, enum Mode mode) {
+int RecurseSubdirs(const std::string path, enum Mode mode) {
   DIR *dir = opendir(path.c_str());
   struct dirent *entry;
   for (entry = readdir(dir); entry != NULL; entry = readdir(dir)) {
@@ -247,13 +304,13 @@ int recurse_subdirs(const std::string path, enum Mode mode) {
       continue;
     std::string p = path + "/" + entry->d_name;
     int ret = 0;
-    if ((ret = recurse(p, mode)) != 0)
+    if ((ret = Recurse(p, mode)) != 0)
       return ret;
   }
   return 0;
 }
 
-int recurse(const std::string path, enum Mode mode) {
+int Recurse(const std::string path, enum Mode mode) {
   struct stat s;
   if (stat(path.c_str(), &s) == -1) {
     perror("");
@@ -264,16 +321,16 @@ int recurse(const std::string path, enum Mode mode) {
     checker = new GitChecker(path);
 
   if (checker == nullptr) {
-    return recurse_subdirs(path, mode);
+    return RecurseSubdirs(path, mode);
   } else {
     std::vector<std::string> mesgs;
-    if (mode | kUncommitted && checker->has_uncommitted())
+    if (mode | kUncommitted && checker->HasUncommitted())
       mesgs.push_back("has uncommited changes");
-    if (mode | kUntracked && checker->has_untracked())
+    if (mode | kUntracked && checker->HasUntracked())
       mesgs.push_back("has untracked changes");
-    if (mode | kUnstaged && checker->has_unstaged())
+    if (mode | kUnstaged && checker->HasUnstaged())
       mesgs.push_back("has unstaged changes");
-    if (mode | kUnpushed && checker->has_unpushed())
+    if (mode | kUnpushed && checker->HasUnpushed())
       mesgs.push_back("has unpushed changes");
 
     for (auto &m : mesgs)
